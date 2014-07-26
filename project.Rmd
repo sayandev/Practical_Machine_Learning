@@ -1,0 +1,229 @@
+---
+title: ' Predict the exercise pattern: Human Activity Recognition'
+output:
+  html_document:
+    keep_md: yes
+---
+
+```{r, echo=FALSE,warning =FALSE}
+library(knitr)
+opts_chunk$set(cache=TRUE, message=FALSE, warning =FALSE)
+```
+Background
+==========
+
+Human Activity Recognition - HAR - has emerged as a key research area in the last years and is gaining increasing attention by the pervasive computing research community especially for the development of context-aware systems.
+In this project analysis been performed to create a human activity prediction model based on data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants while exercising. Incusitive reader can have more information from the website [here][1].
+
+## Get and Clean data
+
+### Load libraries and data
+
+```{r}
+library(caret)
+library(doParallel)
+# Load the data, the strings 'NA', 'NULL' and blank spaces to be seat as NA values
+trainData <- read.csv('pml-training.csv', na.strings=c('', 'NA', 'NULL'))
+testData <- read.csv('pml-testing.csv', na.strings=c('', 'NA', 'NULL'))
+```
+
+## Exploratory Data Analysis
+
+### Find data dimension, names of the variables
+
+```{r}
+dim(trainData)
+
+names(trainData)
+
+```
+
+The data set has `r nrow(trainData)` observations and `r ncol(trainData)` possible predictors. Looks like there is a lot of NAs. Let's check missing values and ranges.
+
+
+```{r,results='hide',echo=FALSE}
+summary(trainData)
+```
+
+Its quite self explanatory that there are lots of predictors that can be removed because of their missing values.
+
+### Examining data types
+
+```{r, results='hide'}
+# Data type per column
+sapply(trainData[1, ], class)
+
+# Look for duplicated columns
+duplicated(names(trainData))
+```
+
+### Indentify the type of activity
+
+Indentify the type of activity and how the observations are distributed.
+
+```{r}
+unique(trainData$classe)
+
+table(trainData$classe)
+```
+
+## Data preprocessing
+
+### Find and remove predictors with zero variance
+```{r}
+nsv <- nearZeroVar(trainData,saveMetrics=TRUE)
+zeroVarPredictors <- nsv[nsv[,"zeroVar"] == TRUE,]
+
+# Remove predictors with zero variance in both the train and the test sets
+dropColumns <- names(trainData) %in% row.names(zeroVarPredictors)
+trainData <- trainData[,!dropColumns]
+testData <- testData[,!dropColumns]
+```
+
+After removing the zero variance predictors, the set has `r ncol(trainData)` possible predictors.
+
+### Remove columns with missing values
+
+```{r}
+# Sum NAs per column
+blankValues <- apply(trainData, 2, function(x) { sum(is.na(x)) })
+
+# Remove columns with more than 50% of NAs
+threshold <- nrow(trainData) * 0.5
+trainData <- trainData[, which(blankValues < threshold)]
+testData <- testData[, which(blankValues < threshold)]
+```
+
+As previously detected that there were lots of missing values, so we drop the predictors which have more than 50% of missing values. The set has now `r ncol(trainData)` possible predictors.
+
+### Drop columns those are not good predictors
+```{r}
+dropColumns <- grep("timestamp|user_name|new_window|num_window|X", names(trainData))
+trainData <- trainData[, -dropColumns]
+testData <- testData[, -dropColumns]
+```
+
+Remove timestamp, user_name, new_window, num_window and X, as they do not seem to be good predictors. There are still `r ncol(trainData)` possible predictors. We may try to apply a dimensionality reduction algorithm such as PCA or SVD, but at this point we think a random forest may have a good performance with `r ncol(trainData)` predictors.
+
+
+## Model Building
+
+Once the data is preprocessed, split the training data in a train and test set to validate our model. We will configure our model to use 4 folds for cross-validation. In random forests, there is no need for cross-validation or a separate test set to get an unbiased estimate of the test set error. It is estimated internally, during the run.  
+
+```{r}
+# Set the seed to make the model reproducible
+set.seed(1445)
+inTrain = createDataPartition(trainData$classe, p=0.7, list=FALSE)
+# 70% of the original training data will be used to train the model
+trainingSet <- trainData[inTrain,]
+# The remaining 30% will be used to test the model
+testingSet <- trainData[-inTrain,]
+```
+
+To optimize the computation time, take advantage of the parallel computing. The code is run in a multi-core machine, so we allow it to use up to the total number of cores - 1.
+
+```{r, results='hide'}
+# Parallel computing setup
+
+numCores <- detectCores()
+registerDoParallel(cores = numCores - 1)
+```
+
+### Error estimation with cross validation
+```{r}
+cvFolds <- 10
+```
+Define some parameters to control the training of the random forest. Use cross-validation with `r cvFolds` folds. The 'classe' variable is the outcome, the attribute we want to predict.
+
+```{r, results='hide'}
+# RandomForest
+trControl <- trainControl(method="cv", number=cvFolds, verboseIter=T)
+modelFit <- train(classe ~., data=trainingSet, method="rf", trControl=trControl, allowParallel=TRUE)
+```
+```{r}
+# Model summary
+modelFit
+# Final model
+modelFit$finalModel
+```
+
+The final model selected has a high accuracy on the training set as seen in the confusion matrix above.
+
+### Computing In Sample Error
+
+```{r}
+# In Sample Error
+predictions <- predict(modelFit, newdata=trainingSet)
+inSampleError <- sum(predictions != trainingSet$classe) * 100 / nrow(trainingSet)
+```
+
+The In Sample error calculated is `r inSampleError`%
+
+### Evaluate the prediction model
+
+```{r}
+# Test the model with a test set
+predictions <- predict(modelFit, newdata=testingSet)
+```
+```{r, echo=FALSE, results='hide'}
+predictions
+```
+
+The confusion matrix shows the high accuracy on the test set.
+
+```{r}
+confusionMatrix(predictions,testingSet$classe)
+```
+
+### Compute the Out of Sample Error
+
+Given that the random forest performs cross validation internally and the good results, we would expect a low out of sample error:
+
+```{r}
+outOfSampleError <- sum(predictions != testingSet$classe) * 100 / nrow(testingSet)
+```
+
+The Out of Sample error calculated on the test set is `r outOfSampleError`%
+
+```{r, echo=FALSE, results='hide'}
+importance(modelFit$finalModel)
+
+summary(modelFit)
+```
+
+## Figures
+
+The first figure shows the importance measures for the top 20 attributes, in decreasing order of importance.
+
+```{r, echo=FALSE}
+varImpPlot(modelFit$finalModel, sort=TRUE, n.var=20, main="Importance for top 20 attributes", col="dark blue", pch=19)
+```
+
+The next plot shows the error rates vs number of trees. As the number of trees increases the error rates decrease. The number of trees used in our analysis is 500. 
+
+```{r, echo=FALSE}
+plot(modelFit$finalModel, log="y", main="Error rates vs number of trees")
+```
+## Prediction
+
+```{r}
+predictions <- predict(modelFit, newdata=testData)
+predictions
+```
+
+```{r, echo=FALSE, results='hide'}
+
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+
+pml_write_files(predictions)
+```
+
+## References
+1. Groupware@LES - Human Activity Recognition
+[1]: http://groupware.les.inf.puc-rio.br/har 
